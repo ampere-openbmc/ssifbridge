@@ -16,10 +16,6 @@ PKG_CHECK_MODULES([SYSTEMD], [libsystemd >= 221])
 
 # Checks for header files.
 AC_CHECK_HEADER(systemd/sd-bus.h, ,[AC_MSG_ERROR([Could not find systemd/sd-bus.h...systemd developement package required])])
-AC_CHECK_HEADER(linux/ssif-bmc.h,[HAVE_LINUX_SSIF_BMC_H=""],[HAVE_LINUX_SSIF_BMC_H="-I linux/ssif-bmc.h"])
-AS_IF([test "$HAVE_LINUX_SSIF_BMC_H" != ""],
-    AC_MSG_WARN([Could not find linux/ssif-bmc.h])
-)
 
 # Checks for typedefs, structures, and compiler characteristics.
 AX_APPEND_COMPILE_FLAGS([-fpic -Wall -Werror], [CFLAGS])

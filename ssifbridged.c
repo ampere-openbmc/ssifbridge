@@ -37,14 +37,12 @@
 #include <string.h>
 #include <syslog.h>
 #include <sys/mman.h>
+#include <linux/ioctl.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/timerfd.h>
 #include <time.h>
 #include <unistd.h>
-
-#include <linux/ssif-bmc.h>
-
 #include <systemd/sd-bus.h>
 
 static const char *ssif_bmc_device = "/dev/ipmi-ssif-host";
@@ -157,8 +155,8 @@ static struct ipmi_msg *ssif_msg_create(struct ssifbridged_context *context,
 
 	MSG_OUT("Trying to get SSIF message with len (%d)\n", len);
 
-	context->ssif_pending_msg.data_len = len - 3;
 	/* Don't count the lenfn/ln, seq and command */
+	context->ssif_pending_msg.data_len = len - 3;
 	context->ssif_pending_msg.netfn = ssif_data[1] >> 2;
 	context->ssif_pending_msg.lun = ssif_data[1] & 0x3;
 	/* Force sequence field = 0 for SSIF */
@@ -238,30 +236,6 @@ static int send_received_message_signal(struct ssifbridged_context *context,
 	return r;
 }
 
-static int method_send_sms_atn(sd_bus_message *msg, void *userdata,
-		sd_bus_error *ret_error)
-{
-	int r;
-	struct ssifbridged_context *ssif_fd = userdata;
-
-	MSG_OUT("Sending SMS_ATN ioctl (%d) to %s\n",
-			SSIF_BMC_IOCTL_SMS_ATN, SSIF_BMC_PATH);
-
-	r = ioctl(ssif_fd->fds[SSIF_FD].fd, SSIF_BMC_IOCTL_SMS_ATN);
-	if (r == -1) {
-		r = errno;
-		MSG_ERR("Couldn't ioctl() to 0x%x, %s: %s\n",
-				ssif_fd->fds[SSIF_FD].fd,
-				SSIF_BMC_PATH,
-				strerror(r));
-		return sd_bus_reply_method_errno(msg, errno, ret_error);
-	}
-
-	r = 0;
-
-	return sd_bus_reply_method_return(msg, "x", r);
-}
-
 /*
  * Send a response on the SSIF driver
  */
@@ -334,8 +308,7 @@ static int method_send_message(sd_bus_message *msg,
 		sd_bus_error_set_const(ret_error,
 				"org.openbmc.error",
 				"Internal error");
-		r = -EINVAL;
-		goto done;
+		return -EINVAL;
 	}
 
 	r = sd_bus_message_new_method_return(msg, &resp_msg);
@@ -584,11 +557,6 @@ static const sd_bus_vtable ipmid_vtable[] = {
 			"x",
 			&method_send_message,
 			SD_BUS_VTABLE_UNPRIVILEGED),
-	SD_BUS_METHOD("setAttention",
-			"",
-			"x",
-			&method_send_sms_atn,
-			SD_BUS_VTABLE_UNPRIVILEGED),
 	SD_BUS_SIGNAL("ReceivedMessage",
 			"yyyyay",
 			0),
@@ -609,6 +577,10 @@ int main(int argc, char *argv[]) {
 	};
 
 	context = calloc(1, sizeof(*context));
+	if (context == NULL) {
+		MSG_ERR("Failed to allocate memory\n");
+		exit(EXIT_FAILURE);
+	}
 
 	ssif_vlog = &ssif_log_console;
 	while ((opt = getopt_long(argc, argv, "", long_options, NULL)) != -1) {
@@ -641,7 +613,7 @@ int main(int argc, char *argv[]) {
 	r = sd_bus_default_system(&context->bus);
 	if (r < 0) {
 		MSG_ERR("Failed to connect to system bus: %s\n", strerror(-r));
-		goto finish;
+		goto error;
 	}
 
 	MSG_OUT("Registering dbus methods/signals\n");
@@ -653,7 +625,7 @@ int main(int argc, char *argv[]) {
 			context);
 	if (r < 0) {
 		MSG_ERR("Failed to issue method call: %s\n", strerror(-r));
-		goto finish;
+		goto deregister_sdbus;
 	}
 
 	MSG_OUT("Requesting dbus name: %s\n", DBUS_NAME);
@@ -661,7 +633,7 @@ int main(int argc, char *argv[]) {
 		SD_BUS_NAME_ALLOW_REPLACEMENT | SD_BUS_NAME_REPLACE_EXISTING);
 	if (r < 0) {
 		MSG_ERR("Failed to acquire service name: %s\n", strerror(-r));
-		goto finish;
+		goto deregister_sdbus;
 	}
 
 	MSG_OUT("Getting dbus file descriptors\n");
@@ -670,7 +642,7 @@ int main(int argc, char *argv[]) {
 		r = -errno;
 		MSG_OUT("Couldn't get the bus file descriptor: %s\n",
 				strerror(errno));
-		goto finish;
+		goto deregister_sdbus;
 	}
 
 	MSG_OUT("Opening %s\n", SSIF_BMC_PATH);
@@ -680,7 +652,7 @@ int main(int argc, char *argv[]) {
 		MSG_ERR("Couldn't open %s with flags O_RDWR: %s\n",
 				SSIF_BMC_PATH,
 				strerror(errno));
-		goto finish;
+		goto free_sdbus_fd;
 	}
 
 	MSG_OUT("Creating timer fd\n");
@@ -688,7 +660,7 @@ int main(int argc, char *argv[]) {
 	if (context->fds[TIMER_FD].fd < 0) {
 		r = -errno;
 		MSG_ERR("Couldn't create timer fd: %s\n", strerror(errno));
-		goto finish;
+		goto free_ssif_fd;
 	}
 	context->fds[SD_BUS_FD].events = POLLIN;
 	context->fds[SSIF_FD].events = POLLIN;
@@ -727,9 +699,14 @@ int main(int argc, char *argv[]) {
 	}
 
 finish:
-	close(context->fds[SSIF_FD].fd);
 	close(context->fds[TIMER_FD].fd);
+free_ssif_fd:
+	close(context->fds[SSIF_FD].fd);
+free_sdbus_fd:
+	close(context->fds[SD_BUS_FD].fd);
+deregister_sdbus:
 	sd_bus_unref(context->bus);
+error:
 	free(context);
 
 	return r;
