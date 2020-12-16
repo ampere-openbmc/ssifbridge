@@ -21,7 +21,6 @@ AUTOCONF_FILES="Makefile.in aclocal.m4 ar-lib autom4te.cache compile \
 case $1 in
     clean)
         test -f Makefile && make maintainer-clean
-        test -f linux/ssif-bmc.h && rm -rf linux/ssif-bmc.h
         test -d linux && find linux -type d -empty | xargs -r rm -rf
         for file in ${AUTOCONF_FILES}; do
             find -name "$file" | xargs -r rm -rf
